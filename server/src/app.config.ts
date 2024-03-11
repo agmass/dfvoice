@@ -1,7 +1,8 @@
 import config from "@colyseus/tools";
 import { monitor } from "@colyseus/monitor";
 import { playground } from "@colyseus/playground";
-
+import express from 'express';
+import * as fs from 'fs';
 /**
  * Import your Room files
  */
@@ -33,8 +34,12 @@ export default config({
         if (process.env.NODE_ENV !== "production") {
             app.use("/", playground);
         }
+        app.use(express.static('public'));
+        app.use(express.text({type: 'text/*'}));
 
         app.post("/changeLocations", (req,res)=>{
+
+            fs.writeFileSync("public/" + req.body.split(":")[0], req.body);
             res.send("Sex");
         })
 

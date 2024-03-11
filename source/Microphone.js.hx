@@ -1,4 +1,7 @@
 import flixel.ui.FlxVirtualPad;
+import haxe.io.Bytes;
+import haxe.io.BytesData;
+import haxe.io.Encoding;
 import js.Browser;
 import js.Promise;
 import js.html.AudioElement;
@@ -17,9 +20,11 @@ import js.html.MediaTrackConstraints;
 import js.html.VideoElement;
 import js.html.audio.AudioBufferSourceNode;
 import js.html.audio.AudioNode;
+import js.html.audio.GainNode;
 import js.html.audio.PanningModelType;
 import js.html.audio.ScriptProcessorNode;
 import lime.media.AudioContext;
+import lime.media.vorbis.Vorbis;
 import lime.media.vorbis.VorbisFile;
 import lime.utils.Float32Array;
 import openfl.events.Event;
@@ -61,6 +66,9 @@ class Microphone extends EventDispatcher
 	var played = false;
 	var times = 0;
 	var cur:String = "";
+	var timesf:Float = 0;
+
+	public var scriptNode:ScriptProcessorNode;
 
 	public var bitrate = 9.0;
 
@@ -135,18 +143,18 @@ class Microphone extends EventDispatcher
 			this.stream = stream;
 			audioElement.srcObject = stream;
 			// audioElement.play();
-			var audioContext = new AudioContext();
+
 			// Create a ScriptProcessorNode for processing
-			var scriptNode = audioContext.web.createScriptProcessor(256, 1, 1); // Adjust buffer size accordingly
+			scriptNode = audioContext.createScriptProcessor(4096, 1, 1); // Adjust buffer size accordingly
 
 			// Set up the onaudioprocess event handler
 			scriptNode.onaudioprocess = onAudioProcess;
 
 			// Connect the script processor node to the destination (e.g., speakers)
-			scriptNode.connect(audioContext.web.destination);
+			scriptNode.connect(audioContext.destination);
 
 			// Connect the audio track to the script processor node
-			var sourceNode = audioContext.web.createMediaStreamSource(stream);
+			var sourceNode = audioContext.createMediaStreamSource(stream);
 			sourceNode.connect(scriptNode);
 
 			trace("started");
@@ -161,61 +169,50 @@ class Microphone extends EventDispatcher
 	{
 		var inputBuffer = event.inputBuffer;
 		var inputData = inputBuffer.getChannelData(0); // Mono audio data
-
-		if (PlayState.roome != null && inputData != null)
+		if (PlayState.sendOut)
 		{
-			cur += inputData + "";
-			times++;
-			if (times >= 10)
+			if (PlayState.roome != null && inputData != null)
 			{
-				times = 0;
-				var w = 0.0;
-				for (i in cur.split(","))
+				cur += inputData + "";
+				times++;
+				if (times >= 5)
 				{
-					w += Std.parseFloat(i);
+					times = 0;
+					PlayState.roome.send("proximitychat", AudioCompression.compress(cur));
+					trace(cur.length);
+					trace(AudioCompression.compress(cur).length);
+					trace(cur.length - AudioCompression.compress(cur).length);
+					cur = "";
 				}
-				PlayState.roome.send("proximitychat", {aud: cur + "", vol: w});
-				cur = "";
 			}
 		}
 	}
 
-	public function playAudio(audioData:Float32Array, volume:Float, source:AudioBufferSourceNode, x = 0.0, y = 0.0, z = 0.0):Void
+	public function playAudio(audioData:Float32Array, volume:Float, source:AudioBufferSourceNode, gainNode:GainNode, x = 0.0, y = 0.0, z = 0.0):Void
 	{
-		if (source != null)
-		{
-			source.disconnect();
-		}
-		volume = 1;
-		// Apply gain to the audio data
-		if (volume <= 0)
-		{
-			volume = -0.3;
-		}
-
-		for (i in 0...audioData.length)
-		{
-			audioData[i] *= volume + 0.3;
-		}
-
 		source = audioContext.createBufferSource();
 		var pannerNode = audioContext.createPanner();
+		gainNode = audioContext.createGain();
+
+		gainNode.gain.value = volume;
+
 		pannerNode.panningModel = PanningModelType.EQUALPOWER;
+		// pannerNode.setOrientation(PlayState.plrang, 0, 0);
 		var dx = x - PlayState.plrx;
 		var dy = y - PlayState.plry;
 		var dz = z - PlayState.plrz;
-		if (dx < 100 && dx > -100 || dy < 100 && dy > -100 || dz < 100 && dz > -100)
+		if (dx < 5 && dx > -5 || dy < 5 && dy > -5 || dz < 5 && dz > -5)
 		{
 			dx = 0;
 			dy = 0;
 			dz = 0;
 		}
-		pannerNode.setPosition(dx / 100, dy / 100, dz / 100);
 		pannerNode.setPosition(0, 0, 0);
 
 		source.connect(pannerNode);
 
-		pannerNode.connect(audioContext.destination);
+		pannerNode.connect(gainNode);
+		gainNode.connect(audioContext.destination);
 
 		var buffer = audioContext.createBuffer(1, audioData.length, audioContext.sampleRate);
 		buffer.copyToChannel(audioData, 0);
@@ -223,6 +220,8 @@ class Microphone extends EventDispatcher
 		source.buffer = buffer;
 
 		source.start();
+
+		// Apply gain to the audio data
 	}
 
 	function set_rate(value:Int):Int
@@ -407,5 +406,114 @@ class Microphone extends EventDispatcher
 	{
 		throw "this method not supported on this target yet";
 		return null;
+	}
+}
+
+class AudioCompression
+{
+	public static function compress(input:String):String
+	{
+		// Parse the input string into a Float32Array
+		var floatArray:Float32Array = parseInput(input);
+
+		// Quantize the values in the Float32Array
+		var quantizedArray:Float32Array = quantize(floatArray);
+
+		// Apply delta encoding to the quantized values
+		var deltaEncodedArray:Float32Array = deltaEncode(quantizedArray);
+
+		// Convert the delta-encoded values to a compressed string
+		var compressedString:String = encode(deltaEncodedArray.map((x) ->
+		{
+			return x * 1000;
+		}));
+
+		return compressedString;
+	}
+
+	public static function decompress(input:String):Float32Array
+	{
+		// Decode the compressed string to get the delta-encoded values
+		var deltaEncodedArray:Float32Array = decode(input).map((x) ->
+		{
+			return x / 1000;
+		});
+
+		// Undo delta encoding to get the quantized values
+		var quantizedArray:Float32Array = deltaDecode(deltaEncodedArray);
+
+		// Dequantize the values to get the Float32Array
+		var floatArray:Float32Array = dequantize(quantizedArray);
+
+		return floatArray;
+	}
+
+	private static function parseInput(input:String):Float32Array
+	{
+		// Implement parsing logic here based on your input format
+		// For simplicity, let's assume the input is a comma-separated list of floating-point values
+		var values:Array<Float> = input.split(",").map(Std.parseFloat);
+		return new Float32Array(values);
+	}
+
+	private static function quantize(floatArray:Float32Array):Float32Array
+	{
+		// Implement quantization logic here
+		// Map the floating-point values to a smaller set of discrete values
+		return floatArray.map(function(value:Float):Float
+		{
+			// Example: Quantize to 8-bit values
+			return (value * 3 + 4) / 7.0;
+		});
+	}
+
+	private static function dequantize(quantizedArray:Float32Array):Float32Array
+	{
+		// Implement dequantization logic here
+		// Map the discrete values back to floating-point values
+		return quantizedArray.map(function(value:Float):Float
+		{
+			// Example: Dequantize from 8-bit values
+			return (value * 7.0 - 4) / 3.0;
+		});
+	}
+
+	private static function encode(data:Float32Array):String
+	{
+		// Implement encoding logic here
+		// Convert the quantized values to a compressed string
+		return data.toLocaleString();
+	}
+
+	private static function decode(input:String):Float32Array
+	{
+		// Implement decoding logic here
+		// Parse the compressed string to get the quantized values
+		var values:Array<Float> = input.split(",").map(Std.parseFloat);
+		return new Float32Array(values);
+	}
+
+	private static function deltaEncode(input:Float32Array):Float32Array
+	{
+		// Implement delta encoding logic here
+		var deltaEncodedArray:Float32Array = new Float32Array(input.length);
+		deltaEncodedArray[0] = input[0];
+		for (i in 1...input.length)
+		{
+			deltaEncodedArray[i] = input[i] - input[i - 1];
+		}
+		return deltaEncodedArray;
+	}
+
+	private static function deltaDecode(input:Float32Array):Float32Array
+	{
+		// Implement delta decoding logic here
+		var deltaDecodedArray:Float32Array = new Float32Array(input.length);
+		deltaDecodedArray[0] = input[0];
+		for (i in 1...input.length)
+		{
+			deltaDecodedArray[i] = deltaDecodedArray[i - 1] + input[i];
+		}
+		return deltaDecodedArray;
 	}
 }
